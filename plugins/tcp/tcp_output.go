@@ -136,36 +136,34 @@ func (t *TcpOutput) Init(config interface{}) (err error) {
 
 func (t *TcpOutput) HandlePingWithQueueCursor() {
 	fmt.Printf("Start handling TCPOutput PingPong through Queue Cursor value %s\n", t.isClosingClient)
-	//isPingSent := false
 	pingTicker := time.NewTicker(5 * time.Second)
 	lastPingSentTime := time.Now()
+	lastSentQueueCursor := new(string)
 	for !t.isClosingClient {
 		select {
 		case <-pingTicker.C:
-			if time.Now().Sub(lastPingSentTime) > time.Second * 5 && t.connection != nil {
-				//isPingSent = true
+			if time.Now().Sub(lastPingSentTime) > time.Second * 5 &&
+			*lastSentQueueCursor != t.latestQueueCursor &&
+			t.connection != nil {
+				*lastSentQueueCursor = t.latestQueueCursor
 				go t.SendQueueCursorPing(t.latestQueueCursor)
 			}
 		case queueCursor := <-t.queueCursorChan:
 			t.latestQueueCursor = queueCursor
 			atomic.AddUint64(t.sentMsgCount, 1)
 			if *t.sentMsgCount >= t.batchSize {
-				//fmt.Printf("Sending Ping\n")
-				//isPingSent = true
 				*t.sentMsgCount = 0;
 				lastPingSentTime = time.Now()
+				*lastSentQueueCursor = t.latestQueueCursor
 				go t.SendQueueCursorPing(t.latestQueueCursor)
 			}
 		case isSuccess := <-t.pingRespState:
 			fmt.Printf("Ping status received %s\n", isSuccess)
-			if (isSuccess) {
-				//isPingSent = false
-			}else {
+			if !isSuccess {
 				t.cleanupConn()
 				pingTicker.Stop()
 				t.isRestart = true
-			}
-		}
+			}                }
 	}
 }
 
@@ -237,6 +235,10 @@ func (t *TcpOutput) cleanupConn() {
 	}
 }
 
+func (t *TcpOutput) CleanupForRestart() {
+	fmt.Printf("Restarting the TCPOutput Plugin")
+}
+
 func (t *TcpOutput) CleanUp() {
 	t.cleanupConn()
 }
@@ -260,17 +262,6 @@ func (t *TcpOutput) ProcessMessage(pack *PipelinePack) (err error) {
 		record []byte
 	)
 
-	/*msgPayLoad := pack.Message.Payload
-	if (msgPayLoad != nil) {
-		*msgPayLoad = pack.QueueCursor + "," + *msgPayLoad
-		msgBytes, err := proto.Marshal(pack.Message)
-		if (err == nil) {
-			pack.MsgBytes = msgBytes
-			//pack.TrustMsgBytes = false
-		}else {
-			fmt.Printf("New String encoding failed")
-		}
-	}*/
 	if record, err = t.or.Encode(pack); err != nil {
 		atomic.AddInt64(&t.dropMessageCount, 1)
 		return fmt.Errorf("can't encode: %s", err)
