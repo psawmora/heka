@@ -24,8 +24,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"bufio"
+	"strings"
+//"time"
 
+	"github.com/pborman/uuid"
 	"github.com/mozilla-services/heka/message"
+	"github.com/gogo/protobuf/proto"
 	. "github.com/mozilla-services/heka/pipeline"
 )
 
@@ -42,35 +47,43 @@ type TcpOutput struct {
 	reportLock          sync.Mutex
 	or                  OutputRunner
 	pConfig             *PipelineConfig
+	isClosingClient     bool
+	queueCursorChan     chan string
+	latestQueueCursor   string
+	sentMsgCount        *uint32
+	batchSize           uint32
+	isRestart           bool
+	pingRespState       chan bool
 }
 
 // ConfigStruct for TcpOutput plugin.
 type TcpOutputConfig struct {
 	// String representation of the TCP address to which this output should be
 	// sending data.
-	Address      string
-	LocalAddress string `toml:"local_address"`
-	UseTls       bool   `toml:"use_tls"`
-	Tls          TlsConfig
+	Address         string
+	LocalAddress    string `toml:"local_address"`
+	UseTls          bool   `toml:"use_tls"`
+	Tls             TlsConfig
 	// Interval at which the output queue logs will roll, in seconds. Defaults
 	// to 300.
-	TickerInterval uint `toml:"ticker_interval"`
+	TickerInterval  uint `toml:"ticker_interval"`
 	// Allows for a default encoder.
-	Encoder string
+	Encoder         string
 	// Set to true if TCP Keep Alive should be used.
-	KeepAlive bool `toml:"keep_alive"`
+	KeepAlive       bool `toml:"keep_alive"`
 	// Integer indicating seconds between keep alives.
 	KeepAlivePeriod int `toml:"keep_alive_period"`
 	// Number of successfully processed messages to re-establish the TCP
 	// connection after.  Defaults to 0 (never)
-	ReconnectAfter int64 `toml:"reconnect_after"`
+	ReconnectAfter  int64 `toml:"reconnect_after"`
 	// Specifies whether or not Heka's stream framing wil be applied to the
 	// output. We do some magic to default to true if ProtobufEncoder is used,
 	// false otherwise.
-	UseFraming *bool `toml:"use_framing"`
+	UseFraming      *bool `toml:"use_framing"`
 	// Defaults to true for TcpOutput.
-	UseBuffering *bool `toml:"use_buffering"`
-	Buffering    QueueBufferConfig
+	UseBuffering    *bool `toml:"use_buffering"`
+	Buffering       QueueBufferConfig
+	batchSize       uint32 `toml:"ping_batch_size"`
 }
 
 func (t *TcpOutput) ConfigStruct() interface{} {
@@ -97,6 +110,13 @@ func (t *TcpOutput) SetName(name string) {
 func (t *TcpOutput) Init(config interface{}) (err error) {
 	t.conf = config.(*TcpOutputConfig)
 	t.address = t.conf.Address
+	t.sentMsgCount = new(uint32)
+	t.batchSize = 2
+	*t.sentMsgCount = 0
+	t.isRestart = false
+	t.pingRespState = make(chan bool)
+	t.queueCursorChan = make(chan string)
+	t.isClosingClient = false
 
 	if t.conf.LocalAddress != "" {
 		// Error out if use_tls and local_address options are both set for now.
@@ -110,8 +130,82 @@ func (t *TcpOutput) Init(config interface{}) (err error) {
 	if t.conf.KeepAlivePeriod != 0 {
 		t.keepAliveDuration = time.Duration(t.conf.KeepAlivePeriod) * time.Second
 	}
-
+	go t.HandlePingWithQueueCursor()
 	return
+}
+
+func (t *TcpOutput) HandlePingWithQueueCursor() {
+	fmt.Printf("Start handling TCPOutput PingPong through Queue Cursor value %s\n", t.isClosingClient)
+	isPingSent := false
+	for !t.isClosingClient {
+		//fmt.Printf("Start handling Ping\n")
+		select {
+		case queueCursor := <-t.queueCursorChan:
+			t.latestQueueCursor = queueCursor
+		//fmt.Printf("LatestQueueCursor %s\n", t.latestQueueCursor)
+			atomic.AddUint32(t.sentMsgCount, 1)
+			if *t.sentMsgCount >= t.batchSize && !isPingSent {
+				fmt.Printf("Sending Ping\n")
+				isPingSent = true
+				*t.sentMsgCount = 0;
+				// startTimer or set set a read timeout for the connection.
+				go t.SendQueueCursorPing(t.latestQueueCursor)
+			}
+		case isSuccess := <-t.pingRespState:
+			fmt.Printf("Ping status received %s\n", isSuccess)
+			if (isSuccess) {
+				isPingSent = false
+			}else {
+				t.cleanupConn()
+				t.isRestart = true
+			}
+		}
+	}
+}
+
+func (t *TcpOutput) SendQueueCursorPing(latestQueueCursor string) {
+	fmt.Printf("Sending a ping request with the latest queue cursor. %s\n", latestQueueCursor)
+	msg := new(message.Message)
+	msg.SetUuid(uuid.NewRandom())
+	msg.SetTimestamp(time.Now().UnixNano())
+	msg.SetPayload(latestQueueCursor + "##")
+
+	pack := new(PipelinePack)
+	pack.Message = msg
+	msgBytes, err := proto.Marshal(msg)
+
+	if err == nil {
+		pack.MsgBytes = msgBytes
+		record, err := t.or.Encode(pack)
+		if err != nil {
+			fmt.Printf("Error occurred while encoding the ping message. Setting the pluggin to restart")
+			t.pingRespState <- false
+			return
+		}
+		go t.StartListeningToPingResponse();
+		if n, err := t.connection.Write(record); err != nil {
+			t.pingRespState <- false
+		} else if n != len(record) {
+			t.pingRespState <- false
+		}
+	}else {
+		fmt.Errorf("Sending latestQueueCursor %s to the receiver failed.", latestQueueCursor)
+		t.pingRespState <- false
+	}
+}
+
+func (t *TcpOutput) StartListeningToPingResponse() {
+	t.connection.SetReadDeadline(time.Now().Add(5 * time.Second))
+	lastUpdatedCursor, err := bufio.NewReader(t.connection).ReadString('_')
+	if err != nil {
+		fmt.Errorf("Error occured while reading for the latest cursor %s. Exiting from the service", err)
+		t.pingRespState <- false
+	} else {
+		fmt.Printf("The lastest completed cursor value %s. Updating the Output Runner Queue", lastUpdatedCursor)
+		lastUpdatedCursor = strings.Split(lastUpdatedCursor, "_")[0]
+		t.or.UpdateCursor(lastUpdatedCursor)
+		t.pingRespState <- true
+	}
 }
 
 func (t *TcpOutput) Prepare(or OutputRunner, h PluginHelper) (err error) {
@@ -131,6 +225,7 @@ func (t *TcpOutput) Prepare(or OutputRunner, h PluginHelper) (err error) {
 
 func (t *TcpOutput) cleanupConn() {
 	if t.connection != nil {
+		t.isClosingClient = true // Need to use a bool channel - Prabath
 		t.connection.Close()
 		t.connection = nil
 	}
@@ -141,6 +236,10 @@ func (t *TcpOutput) CleanUp() {
 }
 
 func (t *TcpOutput) ProcessMessage(pack *PipelinePack) (err error) {
+	if t.isRestart {
+		fmt.Printf("Exiting from the plugin. It would be restarted if the behavior permits")
+		return NewPluginExitError("Ping response didn't receive from the remote server. Restarting the pluggin")
+	}
 	if t.connection == nil {
 		if err = t.connect(); err != nil {
 			// Explicitly set t.connection to nil because Go, see
@@ -151,10 +250,21 @@ func (t *TcpOutput) ProcessMessage(pack *PipelinePack) (err error) {
 	}
 
 	var (
-		n      int
+		n int
 		record []byte
 	)
 
+	/*msgPayLoad := pack.Message.Payload
+	if (msgPayLoad != nil) {
+		*msgPayLoad = pack.QueueCursor + "," + *msgPayLoad
+		msgBytes, err := proto.Marshal(pack.Message)
+		if (err == nil) {
+			pack.MsgBytes = msgBytes
+			//pack.TrustMsgBytes = false
+		}else {
+			fmt.Printf("New String encoding failed")
+		}
+	}*/
 	if record, err = t.or.Encode(pack); err != nil {
 		atomic.AddInt64(&t.dropMessageCount, 1)
 		return fmt.Errorf("can't encode: %s", err)
@@ -168,10 +278,11 @@ func (t *TcpOutput) ProcessMessage(pack *PipelinePack) (err error) {
 		err = NewRetryMessageError("truncated output to: %s", t.address)
 	} else {
 		atomic.AddInt64(&t.processMessageCount, 1)
-		t.or.UpdateCursor(pack.QueueCursor)
-		if t.conf.ReconnectAfter > 0 &&
-			atomic.LoadInt64(&t.processMessageCount)%t.conf.ReconnectAfter == 0 {
-
+		//fmt.Printf("Queue Cursor %s", pack.QueueCursor)
+		t.queueCursorChan <- pack.QueueCursor
+		//t.or.UpdateCursor(pack.QueueCursor)
+		if t.conf.ReconnectAfter > 0 && atomic.LoadInt64(&t.processMessageCount) % t.conf.ReconnectAfter == 0 {
+			fmt.Printf("Cleaning the connection")
 			t.cleanupConn()
 		}
 	}

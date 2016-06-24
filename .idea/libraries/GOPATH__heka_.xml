@@ -1,0 +1,23 @@
+<component name="libraryTable">
+  <library name="GOPATH &lt;heka&gt;">
+    <CLASSES>
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+    <excluded>
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/pborman/uuid/.git" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/mozilla-services/heka/docs/source/_themes" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/gogo/protobuf/protoc-gen-gogo/testdata" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/rafrombrc/gomock/.git" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/rafrombrc/go-notify/.git" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/bbangert/toml/.git" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/rafrombrc/gospec/.git" />
+      <root url="file://$PROJECT_DIR$" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/bbangert/toml/_examples" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/gogo/protobuf/.git" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/gogo/protobuf/proto/testdata" />
+      <root url="file://$USER_HOME$/.gvm/gos/go1.4/lib/src/github.com/mozilla-services/heka/.git" />
+    </excluded>
+  </library>
+</component>

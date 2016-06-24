@@ -22,8 +22,11 @@ import (
 	"net"
 	"sync"
 	"time"
-
+	"bytes"
+	"github.com/gogo/protobuf/proto"
 	. "github.com/mozilla-services/heka/pipeline"
+	"github.com/mozilla-services/heka/message"
+	"strings"
 )
 
 // Input plugin implementation that listens for Heka protocol messages on a
@@ -40,23 +43,23 @@ type TcpInput struct {
 type TcpInputConfig struct {
 	// Network type (e.g. "tcp", "tcp4", "tcp6", "unix" or "unixpacket").
 	// Needs to match the input type.
-	Net string
+	Net             string
 	// String representation of the address of the network connection on which
 	// the listener should be listening (e.g. "127.0.0.1:5565").
-	Address string
+	Address         string
 	// Set to true if the TCP connection should be tunneled through TLS.
 	// Requires additional Tls config section.
-	UseTls bool `toml:"use_tls"`
+	UseTls          bool `toml:"use_tls"`
 	// Subsection for TLS configuration.
-	Tls TlsConfig
+	Tls             TlsConfig
 	// Set to true if TCP Keep Alive should be used.
-	KeepAlive bool `toml:"keep_alive"`
+	KeepAlive       bool `toml:"keep_alive"`
 	// Integer indicating seconds between keep alives.
 	KeepAlivePeriod int `toml:"keep_alive_period"`
 	// So we can default to using ProtobufDecoder.
-	Decoder string
+	Decoder         string
 	// So we can default to using HekaFramingSplitter.
-	Splitter string
+	Splitter        string
 }
 
 func (t *TcpInput) ConfigStruct() interface{} {
@@ -135,6 +138,25 @@ func (t *TcpInput) handleConnection(conn net.Conn) {
 		packDec := func(pack *PipelinePack) {
 			pack.Message.SetHostname(raddr)
 			pack.Message.SetType(name)
+			payload := pack.Message.Payload
+			fmt.Printf("PayLoad - %s", *payload)
+		}
+		sr.SetPackDecorator(packDec)
+	}else {
+		packDec := func(pack *PipelinePack) {
+			msgBytes := pack.MsgBytes
+			msg := new(message.Message)
+			err := proto.Unmarshal(msgBytes, msg)
+			if (err != nil) {
+				fmt.Printf("Payload Unmarshalling Error Occurred")
+			}else if (msg.Payload != nil && strings.Contains(*msg.Payload, "##")) {
+				payload := *msg.Payload
+				fmt.Printf("PayLoad - %s", payload)
+				queueCursor := bytes.Split([]byte(payload), []byte("##"))[0]
+				fmt.Printf("The queue cursor is %s\n", queueCursor)
+				pack.MsgBytes = nil
+				conn.Write([]byte(string(queueCursor)+"_"))
+			}
 		}
 		sr.SetPackDecorator(packDec)
 	}
@@ -149,9 +171,11 @@ func (t *TcpInput) handleConnection(conn net.Conn) {
 			err = sr.SplitStream(conn, deliverer)
 			if err != nil {
 				if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
+					fmt.Println("TEST - Network error occured.")
 					// keep the connection open, we are just checking to see if
 					// we are shutting down: Issue #354
 				} else {
+					fmt.Println("TEST - Network connection is broken. Set the stopped to true.")
 					stopped = true
 				}
 			}
@@ -190,6 +214,7 @@ func (t *TcpInput) Run(ir InputRunner, h PluginHelper) error {
 }
 
 func (t *TcpInput) Stop() {
+	fmt.Println("TEST - Stopping the TCP_INPUT")
 	if err := t.listener.Close(); err != nil {
 		t.ir.LogError(fmt.Errorf("Error closing listener: %s", err))
 	}
