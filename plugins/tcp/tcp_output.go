@@ -50,8 +50,8 @@ type TcpOutput struct {
 	isClosingClient     bool
 	queueCursorChan     chan string
 	latestQueueCursor   string
-	sentMsgCount        *uint32
-	batchSize           uint32
+	sentMsgCount        *uint64
+	batchSize           uint64
 	isRestart           bool
 	pingRespState       chan bool
 }
@@ -83,7 +83,7 @@ type TcpOutputConfig struct {
 	// Defaults to true for TcpOutput.
 	UseBuffering    *bool `toml:"use_buffering"`
 	Buffering       QueueBufferConfig
-	batchSize       uint32 `toml:"ping_batch_size"`
+	batchSize       uint64 `toml:"ping_batch_size"`
 }
 
 func (t *TcpOutput) ConfigStruct() interface{} {
@@ -110,8 +110,8 @@ func (t *TcpOutput) SetName(name string) {
 func (t *TcpOutput) Init(config interface{}) (err error) {
 	t.conf = config.(*TcpOutputConfig)
 	t.address = t.conf.Address
-	t.sentMsgCount = new(uint32)
-	t.batchSize = 2
+	t.sentMsgCount = new(uint64)
+	t.batchSize = 1000
 	*t.sentMsgCount = 0
 	t.isRestart = false
 	t.pingRespState = make(chan bool)
@@ -136,27 +136,33 @@ func (t *TcpOutput) Init(config interface{}) (err error) {
 
 func (t *TcpOutput) HandlePingWithQueueCursor() {
 	fmt.Printf("Start handling TCPOutput PingPong through Queue Cursor value %s\n", t.isClosingClient)
-	isPingSent := false
+	//isPingSent := false
+	pingTicker := time.NewTicker(5 * time.Second)
+	lastPingSentTime := time.Now()
 	for !t.isClosingClient {
-		//fmt.Printf("Start handling Ping\n")
 		select {
+		case <-pingTicker.C:
+			if time.Now().Sub(lastPingSentTime) > time.Second * 5 && t.connection != nil {
+				//isPingSent = true
+				go t.SendQueueCursorPing(t.latestQueueCursor)
+			}
 		case queueCursor := <-t.queueCursorChan:
 			t.latestQueueCursor = queueCursor
-		//fmt.Printf("LatestQueueCursor %s\n", t.latestQueueCursor)
-			atomic.AddUint32(t.sentMsgCount, 1)
-			if *t.sentMsgCount >= t.batchSize && !isPingSent {
-				fmt.Printf("Sending Ping\n")
-				isPingSent = true
+			atomic.AddUint64(t.sentMsgCount, 1)
+			if *t.sentMsgCount >= t.batchSize {
+				//fmt.Printf("Sending Ping\n")
+				//isPingSent = true
 				*t.sentMsgCount = 0;
-				// startTimer or set set a read timeout for the connection.
+				lastPingSentTime = time.Now()
 				go t.SendQueueCursorPing(t.latestQueueCursor)
 			}
 		case isSuccess := <-t.pingRespState:
 			fmt.Printf("Ping status received %s\n", isSuccess)
 			if (isSuccess) {
-				isPingSent = false
+				//isPingSent = false
 			}else {
 				t.cleanupConn()
+				pingTicker.Stop()
 				t.isRestart = true
 			}
 		}
@@ -188,7 +194,7 @@ func (t *TcpOutput) SendQueueCursorPing(latestQueueCursor string) {
 		} else if n != len(record) {
 			t.pingRespState <- false
 		}
-	}else {
+	} else {
 		fmt.Errorf("Sending latestQueueCursor %s to the receiver failed.", latestQueueCursor)
 		t.pingRespState <- false
 	}
