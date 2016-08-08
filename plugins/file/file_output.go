@@ -154,7 +154,7 @@ func (o *FileOutput) Init(config interface{}) (err error) {
 	case 0:
 		// date rotation is disabled
 		o.path = o.Path
-	case 1, 4, 12, 24:
+	case 1, 4, 12, 15, 24:
 		// RotationInterval value is allowed
 		o.startRotateNotifier()
 	default:
@@ -175,7 +175,7 @@ func (o *FileOutput) Init(config interface{}) (err error) {
 
 func (o *FileOutput) startRotateNotifier() {
 	now := time.Now()
-	interval := time.Duration(o.RotationInterval) * time.Hour
+	interval := time.Duration(o.RotationInterval) * time.Minute
 	last := now.Truncate(interval)
 	next := last.Add(interval)
 	until := next.Sub(now)
